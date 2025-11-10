@@ -143,13 +143,32 @@ def seasonal_figure(df_desc: pd.DataFrame, title: str):
         ))
 
     unit = combine_unit(df_desc)
+
+    # --- Title & legend layout to avoid overlap ---
     layout = go.Layout(
-        title=title,
+        title=dict(
+            text=title,
+            x=0.0, xanchor="left",
+            y=0.98, yanchor="top",
+            font=dict(size=16, color="#111", family="Arial, sans-serif")
+        ),
         xaxis=dict(title="Seasonal (Jan → Dec)", tickformat="%b"),
         yaxis=dict(title=f"Value ({unit})" if unit else "Value"),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=50, r=20, t=60, b=40),
+
+        # Legend BELOW the plot; give extra bottom margin so it never collides
+        legend=dict(
+            orientation="h",
+            x=0.0, xanchor="left",
+            y=-0.20, yanchor="top",
+            bgcolor="rgba(255,255,255,0.7)",
+            bordercolor="rgba(0,0,0,0.05)",
+            borderwidth=1,
+            font=dict(size=10)
+        ),
+
+        # More headroom for the title and space at the bottom for the legend
+        margin=dict(l=50, r=20, t=50, b=70),
     )
 
     data = []
@@ -157,7 +176,10 @@ def seasonal_figure(df_desc: pd.DataFrame, title: str):
         data.extend(band_traces)
     data.extend(traces)
 
-    return go.Figure(data=data, layout=layout)
+    fig = go.Figure(data=data, layout=layout)
+    # Keep legend entries tidy (years first, range last)
+    fig.update_layout(legend_traceorder="normal")
+    return fig
 
 def _filter_category(df: pd.DataFrame, category: str) -> pd.DataFrame:
     has_symbol = "SYMBOL" in df.columns
