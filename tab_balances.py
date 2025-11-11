@@ -7,10 +7,9 @@ import streamlit as st
 import plotly.graph_objects as go
 
 # ----------------------------------------------------------------------
-XLSX_PATHS = [
-    Path("/mnt/data") / "2025-11_Global_LPG_NGLs_balances(1).xlsx",
-    Path("2025-11_Global_LPG_NGLs_balances(1).xlsx"),
-]
+# Emplacement du fichier (mêmes fallbacks que tab_hdd)
+DEFAULT_BAL_XLSX = Path("Balances") / "2025-11_Global_LPG_NGLs_balances(1).xlsx"
+BAL_FILE_CANDIDATE = "2025-11_Global_LPG_NGLs_balances(1).xlsx"
 
 SHEET_NAME = "US by PADD and global LPG balances"
 
@@ -23,21 +22,40 @@ USECOLS = "A:Q"
 # ----------------------------------------------------------------------
 _qpat = re.compile(r"^Q([1-4])\s*'?(\d{2})$", re.I)
 
-def _resolve_xlsx() -> Path | None:
-    for p in XLSX_PATHS:
+def _resolve_xlsx(APP_DIR: Path) -> Path | None:
+    """
+    Cherche le fichier comme pour tab_hdd:
+    - APP_DIR / Balances / <fichier>
+    - APP_DIR / <fichier>
+    - /mnt/data / <fichier>
+    - /mnt/data / Balances / <fichier>
+    - sinon, 1er fichier qui matche '2025-11_Global_LPG_NGLs_balances*.xlsx'
+    """
+    candidates = [
+        APP_DIR / DEFAULT_BAL_XLSX,
+        APP_DIR / BAL_FILE_CANDIDATE,
+        Path("/mnt/data") / BAL_FILE_CANDIDATE,
+        Path("/mnt/data") / "Balances" / BAL_FILE_CANDIDATE,
+    ]
+    for p in candidates:
         if p.exists():
             return p
+
+    # fallback: glob dans Balances/ ou racine
+    for root in [APP_DIR / "Balances", Path("/mnt/data") / "Balances", APP_DIR]:
+        if root.exists():
+            g = list(root.glob("2025-11_Global_LPG_NGLs_balances*.xlsx"))
+            if g:
+                return g[0]
     return None
 
 def _is_quarter_label(x) -> bool:
-    if pd.isna(x): 
+    if pd.isna(x):
         return False
     return bool(_qpat.match(str(x).strip()))
 
-def _parse_quarter_label(x) -> tuple[int, int]:
-    """
-    'Q1 23' or "Q1'23" -> (year=2023, quarter=1)
-    """
+def _parse_quarter_label(x):
+    """'Q1 23' ou \"Q1'23\" -> (year=2023, quarter=1)"""
     m = _qpat.match(str(x).strip())
     if not m:
         return None
@@ -49,7 +67,7 @@ def _parse_quarter_label(x) -> tuple[int, int]:
 def _to_number(x):
     """
     Convertit formats Excel fréquents:
-      - nombres entre parenthèses -> négatif  (ex "(169)" -> -169)
+      - nombres entre parenthèses -> négatif  (ex '(169)' -> -169)
       - tirets, '—', '--' -> NaN
       - retire les virgules séparateurs de milliers
     """
@@ -79,70 +97,67 @@ def _load_us_by_padd(xlsx_path: Path):
         xlsx_path, sheet_name=SHEET_NAME, header=None, usecols=USECOLS, engine="openpyxl"
     )
 
-    # repère les lignes "Region" (col A)
-    def _cell_a(i): 
+    # aide pour lire la colonne A
+    def _cell_a(i):
         v = df.iat[i, 0]
         return str(v).strip() if not pd.isna(v) else ""
 
-    region_rows = []
-    for i in range(len(df)):
-        a = _cell_a(i)
-        if a in REGIONS:
-            region_rows.append(i)
+    # repère les lignes 'Region' (col A)
+    region_rows = [i for i in range(len(df)) if _cell_a(i) in REGIONS]
 
-    # trouve la ligne d'entêtes quarters pour chaque bloc région:
     tidy = []
-    for ridx, rstart in enumerate(region_rows):
+    for rstart in region_rows:
         region = _cell_a(rstart)
-        # la ligne d'entêtes est typiquement rstart+1 ou rstart+2 ou rstart+3
+
+        # trouver la ligne d'entêtes (quarters) juste après l'entête de région
         header_row = None
         for j in range(rstart, min(rstart + 6, len(df))):
             row = df.iloc[j, 1:]  # B:Q
             n_q = sum(_is_quarter_label(x) for x in row)
-            if n_q >= max(6, int(0.5 * len(row))):  # majorité de quarters
+            if n_q >= max(6, int(0.5 * len(row))):
                 header_row = j
                 break
         if header_row is None:
-            # pas d'entêtes -> on saute la région
             continue
 
-        # map colonnes -> quarter labels
+        # colonnes de quarters
         quarters = df.iloc[header_row, 1:].tolist()  # B..Q
         qcols = [c for c, q in enumerate(quarters, start=1) if _is_quarter_label(q)]
         qlabels = [df.iat[header_row, c] for c in qcols]
         qmeta = [_parse_quarter_label(x) for x in qlabels]
 
-        # parcourir les lignes suivantes jusqu'à prochaine région / TOTAL / ligne vide massive
+        # lire les lignes jusqu'au prochain bloc
         i = header_row + 1
         while i < len(df):
             a = _cell_a(i)
 
-            # fin de bloc si on tombe sur une nouvelle région connue
+            # fin de bloc si nouvelle région
             if a in REGIONS and i != rstart:
                 break
 
-            # fin si "Total" en col A (on considère que c'est le total de la section, pas un produit)
-            if a.strip().lower().startswith("total") and a != "":
+            # fin si une ligne 'Total ...' démarre un sous-total
+            if a and a.strip().lower().startswith("total"):
                 break
 
-            # une ligne produit: nom en col A, valeurs en B:Q
+            # ligne produit: nom en A, valeurs B:Q
             if a not in ("", "Demand", "Supply"):
                 product = a
 
-                # Balance = sur la même ligne que le nom du produit
-                row_bal = [ _to_number(df.iat[i, c]) for c in qcols ]
+                # Balance
+                row_bal = [_to_number(df.iat[i, c]) for c in qcols]
                 for (year, q), lbl, val in zip(qmeta, qlabels, row_bal):
                     tidy.append([region, product, "Balance", str(lbl), year, q, val])
 
-                # lignes suivantes: Demand / Supply si présentes
-                if i + 1 < len(df) and str(_cell_a(i + 1)).strip().lower() == "demand":
-                    row_dem = [ _to_number(df.iat[i + 1, c]) for c in qcols ]
+                # Demand (si présence ligne suivante)
+                if i + 1 < len(df) and _cell_a(i + 1).lower() == "demand":
+                    row_dem = [_to_number(df.iat[i + 1, c]) for c in qcols]
                     for (year, q), lbl, val in zip(qmeta, qlabels, row_dem):
                         tidy.append([region, product, "Demand", str(lbl), year, q, val])
                     i += 1
 
-                if i + 1 < len(df) and str(_cell_a(i + 1)).strip().lower() == "supply":
-                    row_sup = [ _to_number(df.iat[i + 1, c]) for c in qcols ]
+                # Supply (si présence ligne suivante)
+                if i + 1 < len(df) and _cell_a(i + 1).lower() == "supply":
+                    row_sup = [_to_number(df.iat[i + 1, c]) for c in qcols]
                     for (year, q), lbl, val in zip(qmeta, qlabels, row_sup):
                         tidy.append([region, product, "Supply", str(lbl), year, q, val])
                     i += 1
@@ -152,11 +167,9 @@ def _load_us_by_padd(xlsx_path: Path):
     tidy_df = pd.DataFrame(
         tidy, columns=["Region", "Product", "Metric", "QuarterLabel", "Year", "Quarter", "Value"]
     )
-    # nettoyage
+    # nettoyage & tri
     tidy_df["Value"] = pd.to_numeric(tidy_df["Value"], errors="coerce")
     tidy_df = tidy_df.dropna(subset=["Value"]).reset_index(drop=True)
-
-    # ordre chronologique: Year asc, Quarter asc
     tidy_df["SortKey"] = tidy_df["Year"] * 10 + tidy_df["Quarter"]
     tidy_df = tidy_df.sort_values(["Region", "Product", "Metric", "SortKey"]).reset_index(drop=True)
     return tidy_df
@@ -166,10 +179,16 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
     with tabs[tab_index]:
         st.header("Balances — US by PADD")
 
-        xlsx = _resolve_xlsx()
+        xlsx = _resolve_xlsx(APP_DIR)
         if not xlsx:
-            st.error("Fichier Excel introuvable: 2025-11_Global_LPG_NGLs_balances(1).xlsx")
+            st.error(
+                "Fichier Excel introuvable. Place-le dans "
+                "`./Balances/2025-11_Global_LPG_NGLs_balances(1).xlsx` "
+                "ou dans `/mnt/data/`."
+            )
             st.stop()
+
+        st.caption(f"📄 Fichier utilisé : {xlsx}")
 
         try:
             df = _load_us_by_padd(xlsx)
@@ -192,7 +211,7 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
             metrics = st.multiselect(
                 "Séries",
                 ["Balance", "Demand", "Supply"],
-                default=["Balance", "Demand", "Supply"]
+                default=["Balance", "Demand", "Supply"],
             )
 
         d = df[(df["Region"] == region) & (df["Product"] == product) & (df["Metric"].isin(metrics))].copy()
@@ -200,15 +219,18 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
             st.info("Pas de données pour cette sélection.")
             st.stop()
 
-        # Assure l’ordre des quarters
+        # Ordre des quarters (libellés d'origine triés chrono)
         d = d.sort_values("SortKey")
-        x = d.drop_duplicates("QuarterLabel")[["QuarterLabel", "SortKey"]].sort_values("SortKey")["QuarterLabel"].tolist()
+        x = (
+            d.drop_duplicates("QuarterLabel")[["QuarterLabel", "SortKey"]]
+            .sort_values("SortKey")["QuarterLabel"]
+            .tolist()
+        )
 
         # --- Graph saisonnel (quarters sur l’axe X) ---
         fig = go.Figure()
         for m in metrics:
             sub = d[d["Metric"] == m]
-            # Aligne les valeurs sur l’ordre des labels X
             y = []
             for ql in x:
                 val = sub.loc[sub["QuarterLabel"] == ql, "Value"]
@@ -228,6 +250,6 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
         # Tableau des valeurs affichées
         pivot = (
             d.pivot_table(index="QuarterLabel", columns="Metric", values="Value", aggfunc="first")
-             .reindex(x)
+            .reindex(x)
         )
         st.dataframe(pivot, use_container_width=True)
