@@ -58,6 +58,10 @@ def _strip_forecast_tokens(s: str) -> str:
     s = re.sub(r"forec\w*", "", str(s), flags=re.I)
     return _norm(s)
 
+def _c_to_f(s: pd.Series) -> pd.Series:
+    """Convert Celsius to Fahrenheit."""
+    return s * 9.0 / 5.0 + 32.0
+
 # ----------------------------------------------------------------------
 def render_tab(tabs, APP_DIR: Path, tab_index: int = 1) -> None:
     with tabs[tab_index]:
@@ -313,6 +317,11 @@ def render_tab(tabs, APP_DIR: Path, tab_index: int = 1) -> None:
 
             if df_fc.empty:
                 st.error("Forecast data is empty or unusable."); st.stop()
+
+            # --- NEW: conversion systématique °C -> °F pour les feuilles forecast des 10 États US listés ---
+            if entity in USA:
+                df_fc["TempF"] = _c_to_f(pd.to_numeric(df_fc["TempF"], errors="coerce"))
+                st.caption("ℹ️ Conversion appliquée (°C → °F) pour la feuille de prévision de l'État US sélectionné.")
 
             df_fc["DOY"] = df_fc["Date"].dt.dayofyear
             start_fc, end_fc = df_fc["Date"].min(), df_fc["Date"].max()
