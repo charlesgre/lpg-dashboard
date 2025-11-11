@@ -1,145 +1,97 @@
 # tab_imports_exports_stocks.py
-# Onglet: Imports / Exports / Consumption / Production / Stocks (Butane & Propane) – par pays
-#
-# À brancher dans app.py :
-# from tab_imports_exports_stocks import layout as tab_trade_layout, register_callbacks as register_trade_callbacks
-# ...
-# tabs = dcc.Tabs([...,
-#                  dcc.Tab(label="Imports-Exports-Stocks", value="tab_trade", children=tab_trade_layout)])
-# register_trade_callbacks(app)
+# Onglet Streamlit : Imports / Exports / Consumption / Production / Stocks – par pays
 
-from functools import lru_cache
+from pathlib import Path
 import pandas as pd
+import streamlit as st
 import plotly.express as px
-from dash import dcc, html, Input, Output, callback
 
-# --- Chemin vers ton fichier Excel (mets à jour si besoin) ---
-EXCEL_PATH = "Imports-exports-stocks.xlsx"  # s'il est à la racine de ton projet / même dossier que app.py
+# Ton fichier est dans le dossier "Imports-exports-stocks/Imports-exports-stocks.xlsx"
+FILENAME = "Imports-exports-stocks.xlsx"
 
-# --- Chargement + préparation des données ---
-@lru_cache(maxsize=1)
-def load_workbook():
-    # Les titres sont en ligne 3 => header=2 ; colonne A contient les dates
-    xls = pd.ExcelFile(EXCEL_PATH)
-    sheets = {}
-    for sh in xls.sheet_names:
-        df = pd.read_excel(EXCEL_PATH, sheet_name=sh, header=2)
-        # Nettoyage colonnes
-        if df.columns[0] != "Date":
-            df = df.rename(columns={df.columns[0]: "Date"})
-        # Conversion date
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.dropna(subset=["Date"]).reset_index(drop=True)
+MONTH_ORDER = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 
-        # Découpe saisonnière : Année / Mois (1-12) / Nom du mois
-        df["Year"] = df["Date"].dt.year.astype(int)
-        df["Month"] = df["Date"].dt.month.astype(int)
-        df["MonthName"] = pd.Categorical(
-            df["Date"].dt.strftime("%b"),
-            categories=["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
-            ordered=True
-        )
-        sheets[sh] = df
-    return sheets
+def _excel_path(app_dir: Path) -> Path:
+    # essaie à la racine puis dans le sous-dossier
+    root = app_dir / FILENAME
+    sub = app_dir / "Imports-exports-stocks" / FILENAME
+    return root if root.exists() else sub
 
-def list_regions():
-    return list(load_workbook().keys())
+def _load_sheet(path: Path, sheet: str) -> pd.DataFrame:
+    df = pd.read_excel(path, sheet_name=sheet, header=2)
+    # Col A = dates (souvent "Unnamed: 0")
+    if df.columns[0] != "Date":
+        df = df.rename(columns={df.columns[0]: "Date"})
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).reset_index(drop=True)
+    df["Year"] = df["Date"].dt.year.astype(int)
+    df["Month"] = df["Date"].dt.month.astype(int)
+    df["MonthName"] = pd.Categorical(df["Date"].dt.strftime("%b"),
+                                     categories=MONTH_ORDER, ordered=True)
+    return df
 
-def melt_for_seasonal(df: pd.DataFrame) -> pd.DataFrame:
-    """Transforme la feuille en format long pour tracer chaque série en saisonnier."""
-    value_cols = [c for c in df.columns if c not in ["Date", "Year", "Month", "MonthName"]]
-    long_df = df.melt(
-        id_vars=["Year", "Month", "MonthName"],
-        value_vars=value_cols,
-        var_name="Series",
-        value_name="Value"
-    )
-    # on enlève les colonnes vides
-    long_df = long_df.dropna(subset=["Value"])
-    return long_df
+def _melt(df: pd.DataFrame) -> pd.DataFrame:
+    value_cols = [c for c in df.columns if c not in ["Date","Year","Month","MonthName"]]
+    long_df = df.melt(id_vars=["Year","Month","MonthName"],
+                      value_vars=value_cols, var_name="Series", value_name="Value")
+    return long_df.dropna(subset=["Value"])
 
-def build_seasonal_figure(long_df: pd.DataFrame, series_name: str):
-    dsub = long_df[long_df["Series"] == series_name].copy()
-    if dsub.empty:
-        return px.line(title=series_name)  # placeholder
-    fig = px.line(
-        dsub.sort_values(["Year", "Month"]),
-        x="MonthName", y="Value", color="Year",
-        markers=True,
-        title=series_name
-    )
+def _seasonal_fig(dlong: pd.DataFrame, series_name: str):
+    d = dlong[dlong["Series"] == series_name].sort_values(["Year","Month"])
+    if d.empty: 
+        return None
+    fig = px.line(d, x="MonthName", y="Value", color="Year", markers=True, title=series_name)
     fig.update_layout(
-        margin=dict(l=10, r=10, t=50, b=10),
+        margin=dict(l=10, r=10, t=40, b=10),
         legend_title_text="Année",
         xaxis_title="Mois",
         yaxis_title=None,
-        hovermode="x unified"
+        hovermode="x unified",
     )
     return fig
 
-# --- Layout ---
-layout = html.Div(
-    [
-        html.Div(
-            [
-                html.Div("Région :", className="text-sm", style={"marginRight": "8px"}),
-                dcc.Dropdown(
-                    id="trade_region_dd",
-                    options=[{"label": r, "value": r} for r in list_regions()],
-                    value=list_regions()[0],
-                    clearable=False,
-                    style={"minWidth": 260},
-                ),
-            ],
-            style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "12px"},
-        ),
-        html.Div(
-            id="trade_graphs_container",
-            # grille fluide : 1 col mobile, 2 cols medium, 3 cols large
-            style={
-                "display": "grid",
-                "gridTemplateColumns": "repeat(auto-fill, minmax(360px, 1fr))",
-                "gap": "16px",
-            },
-        ),
-    ],
-    style={"padding": "12px"},
-)
+def _order_series(names):
+    # ordre logique
+    key_words = ["inventory", "inventor", "stock",
+                 "imports", "exports",
+                 "consumption", "domestic sales", "sales",
+                 "production", "refinery", "blending"]
+    def k(s):
+        s_low = s.lower()
+        for i, kw in enumerate(key_words):
+            if kw in s_low:
+                return (i, s)
+        return (len(key_words), s)
+    return sorted(names, key=k)
 
-# --- Callbacks ---
-def register_callbacks(app):
-    @app.callback(
-        Output("trade_graphs_container", "children"),
-        Input("trade_region_dd", "value"),
-        prevent_initial_call=False,
-    )
-    def _update_graphs(region):
-        wb = load_workbook()
-        df = wb.get(region)
-        if df is None or df.empty:
-            return [html.Div("Aucune donnée pour cette région.")]
-        long_df = melt_for_seasonal(df)
+def render_trade_tab(tabs, app_dir: Path, tab_index: int = 3):
+    with tabs[tab_index]:
+        st.subheader("Imports • Exports • Consumption • Production • Stocks")
 
-        # Ordre des séries : regrouper par mots-clés usuels si présents
-        # (Imports, Exports, Consumption, Production, Inventory/Stocks)
-        series_all = long_df["Series"].drop_duplicates().tolist()
+        xls_path = _excel_path(app_dir)
+        if not xls_path.exists():
+            st.error(f"Fichier Excel introuvable : {xls_path}")
+            return
 
-        keyword_order = [
-            "Inventory", "Inventories", "Stock", "Stocks",
-            "Imports", "Exports", "Consumption", "domestic sales",
-            "Production", "production", "blending", "refinery",
-        ]
-        def sort_key(s):
-            s_lower = s.lower()
-            for i, k in enumerate(keyword_order):
-                if k.lower() in s_lower:
-                    return (i, s)
-            return (len(keyword_order), s)
-        series_all = sorted(series_all, key=sort_key)
+        sheets = pd.ExcelFile(xls_path).sheet_names
+        region = st.selectbox("Région", sheets, index=0)
 
-        graphs = []
-        for s in series_all:
-            fig = build_seasonal_figure(long_df, s)
-            graphs.append(dcc.Graph(figure=fig, config={"displayModeBar": False}))
-        return graphs
+        df = _load_sheet(xls_path, region)
+        dlong = _melt(df)
+        all_series = _order_series(dlong["Series"].drop_duplicates().tolist())
+
+        # grille 2 colonnes (mets 3 si tu veux plus compact)
+        cols_per_row = 2
+        rows = (len(all_series) + cols_per_row - 1) // cols_per_row
+        i = 0
+        for _ in range(rows):
+            cols = st.columns(cols_per_row)
+            for c in cols:
+                if i >= len(all_series):
+                    break
+                sname = all_series[i]
+                fig = _seasonal_fig(dlong, sname)
+                if fig is not None:
+                    with c:
+                        st.plotly_chart(fig, use_container_width=True)
+                i += 1
