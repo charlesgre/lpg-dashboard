@@ -7,17 +7,22 @@ import streamlit as st
 import pandas as pd
 
 import prices          # ton module existant
-import tab_hdd         # notre onglet HDD
+import tab_hdd         # onglet HDD
+import tab_balances    # << nouvel onglet Balances
 
 st.set_page_config(page_title="LPG Market Dashboard", layout="wide")
 st.title("LPG Market Dashboard")
 
-# 2 onglets : Prices (index 0) et Temp & HDD (index 1)
-tabs = st.tabs(["Prices", "Temp & HDD"])
+# 3 onglets : Prices (0) / Temp & HDD (1) / Balances (2)
+tabs = st.tabs(["Prices", "Temp & HDD", "Balances"])
 
 with tabs[0]:
     prices.render()
 
 APP_DIR = Path(__file__).parent
-# Rendre l’onglet HDD dans le 2e tab (index 1)
+
+# Onglet HDD (index 1)
 tab_hdd.render_tab(tabs, APP_DIR, tab_index=1)
+
+# Onglet Balances (index 2)
+tab_balances.render_balances_tab(tabs, APP_DIR, tab_index=2)
