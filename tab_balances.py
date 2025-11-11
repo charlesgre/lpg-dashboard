@@ -206,10 +206,27 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
              .sort_index()
         )
 
+        # Custom colors by year
+        year_colors = {
+            2026: "blue",
+            2025: "black",
+            2024: "red",
+            2023: "green",
+        }
+
         fig = go.Figure()
         for year in pivot.index:
             yvals = [pivot.loc[year].get(q, None) for q in [1, 2, 3, 4]]
-            fig.add_trace(go.Scatter(x=quarter_labels, y=yvals, mode="lines+markers", name=str(year)))
+            color = year_colors.get(year, None)
+            fig.add_trace(
+                go.Scatter(
+                    x=quarter_labels,
+                    y=yvals,
+                    mode="lines+markers",
+                    name=str(year),
+                    line=dict(color=color, width=2.5 if color else 1.8),
+                )
+            )
 
         fig.update_layout(
             title=f"{region} — {product} — {metric} (kb/d) • Seasonal by Quarter",
