@@ -7,31 +7,24 @@ import streamlit as st
 import plotly.graph_objects as go
 
 # ----------------------------------------------------------------------
-# Emplacement du fichier (mêmes fallbacks que tab_hdd)
+# Excel file location (same fallback logic as tab_hdd)
 DEFAULT_BAL_XLSX = Path("Balances") / "2025-11_Global_LPG_NGLs_balances(1).xlsx"
 BAL_FILE_CANDIDATE = "2025-11_Global_LPG_NGLs_balances(1).xlsx"
 
-# ✅ Nom exact de la feuille
+# ✅ Exact sheet name
 SHEET_NAME = "US by PADD"
 
-# Régions à afficher (et l'ordre)
+# Regions (and order)
 REGIONS = ["PADD 1", "PADD 2", "PADD 3", "PADD 4", "PADD 5", "Total US"]
 
-# On ne lit que A:Q comme demandé
+# Read only columns A:Q
 USECOLS = "A:Q"
 
 # ----------------------------------------------------------------------
 _qpat = re.compile(r"^Q([1-4])\s*'?(\d{2})$", re.I)
 
 def _resolve_xlsx(APP_DIR: Path) -> Path | None:
-    """
-    Cherche le fichier comme pour tab_hdd:
-    - APP_DIR / Balances / <fichier>
-    - APP_DIR / <fichier>
-    - /mnt/data / <fichier>
-    - /mnt/data / Balances / <fichier>
-    - sinon, 1er fichier qui matche '2025-11_Global_LPG_NGLs_balances*.xlsx'
-    """
+    """Locate the Excel file (same logic as tab_hdd)."""
     candidates = [
         APP_DIR / DEFAULT_BAL_XLSX,
         APP_DIR / BAL_FILE_CANDIDATE,
@@ -55,7 +48,7 @@ def _is_quarter_label(x) -> bool:
     return bool(_qpat.match(str(x).strip()))
 
 def _parse_quarter_label(x):
-    """'Q1 23' ou \"Q1'23\" -> (year=2023, quarter=1)"""
+    """'Q1 23' or "Q1'23" -> (year=2023, quarter=1)"""
     m = _qpat.match(str(x).strip())
     if not m:
         return None
@@ -66,10 +59,10 @@ def _parse_quarter_label(x):
 
 def _to_number(x):
     """
-    Convertit formats Excel fréquents:
-      - nombres entre parenthèses -> négatif  (ex '(169)' -> -169)
-      - tirets, '—', '--' -> NaN
-      - retire les virgules séparateurs de milliers
+    Converts Excel-style number formats:
+      - (169) → -169
+      - dashes or blanks → NaN
+      - removes thousand separators
     """
     if pd.isna(x):
         return pd.NA
@@ -89,9 +82,9 @@ def _to_number(x):
 @st.cache_data(show_spinner=False)
 def _load_us_by_padd(xlsx_path: Path):
     """
-    Retourne un DataFrame tidy:
+    Returns a tidy DataFrame:
     columns = [Region, Product, Metric, QuarterLabel, Year, Quarter, Value]
-    Metrics ∈ {"Balance","Demand","Supply"}
+    Metrics ∈ {"Balance", "Demand", "Supply"}
     """
     df = pd.read_excel(
         xlsx_path, sheet_name=SHEET_NAME, header=None, usecols=USECOLS, engine="openpyxl"
@@ -107,7 +100,7 @@ def _load_us_by_padd(xlsx_path: Path):
     for rstart in region_rows:
         region = _cell_a(rstart)
 
-        # ligne d'entêtes (quarters) juste après la région
+        # Find the header row (quarter labels)
         header_row = None
         for j in range(rstart, min(rstart + 6, len(df))):
             row = df.iloc[j, 1:]  # B:Q
@@ -126,7 +119,6 @@ def _load_us_by_padd(xlsx_path: Path):
         i = header_row + 1
         while i < len(df):
             a = _cell_a(i)
-
             if a in REGIONS and i != rstart:
                 break
             if a and a.strip().lower().startswith("total"):
@@ -135,16 +127,19 @@ def _load_us_by_padd(xlsx_path: Path):
             if a not in ("", "Demand", "Supply"):
                 product = a
 
+                # Balance
                 row_bal = [_to_number(df.iat[i, c]) for c in qcols]
                 for (year, q), lbl, val in zip(qmeta, qlabels, row_bal):
                     tidy.append([region, product, "Balance", str(lbl), year, q, val])
 
+                # Demand
                 if i + 1 < len(df) and _cell_a(i + 1).lower() == "demand":
                     row_dem = [_to_number(df.iat[i + 1, c]) for c in qcols]
                     for (year, q), lbl, val in zip(qmeta, qlabels, row_dem):
                         tidy.append([region, product, "Demand", str(lbl), year, q, val])
                     i += 1
 
+                # Supply
                 if i + 1 < len(df) and _cell_a(i + 1).lower() == "supply":
                     row_sup = [_to_number(df.iat[i + 1, c]) for c in qcols]
                     for (year, q), lbl, val in zip(qmeta, qlabels, row_sup):
@@ -165,66 +160,59 @@ def _load_us_by_padd(xlsx_path: Path):
 # ----------------------------------------------------------------------
 def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
     with tabs[tab_index]:
-        st.header("Balances — US by PADD")
+        st.header("US LPG Balances — by PADD")
 
         xlsx = _resolve_xlsx(APP_DIR)
         if not xlsx:
             st.error(
-                "Fichier Excel introuvable. Place-le dans "
+                "Excel file not found. Please place it in "
                 "`./Balances/2025-11_Global_LPG_NGLs_balances(1).xlsx` "
-                "ou dans `/mnt/data/`."
+                "or in `/mnt/data/`."
             )
             st.stop()
 
-        st.caption(f"📄 Fichier utilisé : {xlsx}")
+        st.caption(f"📄 Loaded file: {xlsx}")
 
         try:
             df = _load_us_by_padd(xlsx)
         except Exception as e:
-            st.error(f"Erreur de lecture: {e}")
+            st.error(f"Error reading Excel file: {e}")
             st.stop()
 
         if df.empty:
-            st.warning("Aucune donnée parsée dans la feuille 'US by PADD' (A:Q).")
+            st.warning("No data found in sheet 'US by PADD' (columns A:Q).")
             st.stop()
 
         # --- UI ---
-        c1, c2, c3 = st.columns([1.1, 1.2, 1.2])
+        c1, c2, c3 = st.columns([1.1, 1.2, 1.0])
         with c1:
-            region = st.selectbox("Région", REGIONS, index=0)
+            region = st.selectbox("Region", REGIONS, index=0)
         products_in_region = sorted(df.loc[df["Region"] == region, "Product"].unique().tolist())
         with c2:
-            product = st.selectbox("Produit", products_in_region, index=0)
+            product = st.selectbox("Product", products_in_region, index=0)
         with c3:
-            metrics = st.multiselect(
-                "Séries",
-                ["Balance", "Demand", "Supply"],
-                default=["Balance", "Demand", "Supply"],
-            )
+            metric = st.radio("Series", ["Balance", "Demand", "Supply"], index=0, horizontal=False)
 
-        d = df[(df["Region"] == region) & (df["Product"] == product) & (df["Metric"].isin(metrics))].copy()
+        # Filter for single series
+        d = df[(df["Region"] == region) & (df["Product"] == product) & (df["Metric"] == metric)].copy()
         if d.empty:
-            st.info("Pas de données pour cette sélection.")
+            st.info("No data for this selection.")
             st.stop()
 
-        d = d.sort_values("SortKey")
-        x = (
-            d.drop_duplicates("QuarterLabel")[["QuarterLabel", "SortKey"]]
-            .sort_values("SortKey")["QuarterLabel"]
-            .tolist()
+        # Seasonal view: X = Q1..Q4, one line per year
+        quarter_labels = ["Q1", "Q2", "Q3", "Q4"]
+        pivot = (
+            d.pivot_table(index="Year", columns="Quarter", values="Value", aggfunc="first")
+             .sort_index()
         )
 
         fig = go.Figure()
-        for m in metrics:
-            sub = d[d["Metric"] == m]
-            y = []
-            for ql in x:
-                val = sub.loc[sub["QuarterLabel"] == ql, "Value"]
-                y.append(val.iloc[0] if not val.empty else None)
-            fig.add_trace(go.Scatter(x=x, y=y, mode="lines+markers", name=m))
+        for year in pivot.index:
+            yvals = [pivot.loc[year].get(q, None) for q in [1, 2, 3, 4]]
+            fig.add_trace(go.Scatter(x=quarter_labels, y=yvals, mode="lines+markers", name=str(year)))
 
         fig.update_layout(
-            title=f"{region} — {product}: Balance / Demand / Supply (kb/d)",
+            title=f"{region} — {product} — {metric} (kb/d) • Seasonal by Quarter",
             xaxis_title="Quarter",
             yaxis_title="kb/d",
             legend=dict(orientation="h"),
@@ -233,8 +221,9 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        pivot = (
-            d.pivot_table(index="QuarterLabel", columns="Metric", values="Value", aggfunc="first")
-            .reindex(x)
+        # Table view: rows = quarters, columns = years
+        table = (
+            pivot.T.rename(index={1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"})
+                  .reindex(quarter_labels)
         )
-        st.dataframe(pivot, use_container_width=True)
+        st.dataframe(table, use_container_width=True)
