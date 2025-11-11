@@ -18,9 +18,8 @@ SHEET_GLOBAL  = "Global LPG balances"
 # PADD regions (order)
 PADD_REGIONS = ["PADD 1", "PADD 2", "PADD 3", "PADD 4", "PADD 5", "Total US"]
 
-# Global regions wanted (display order)
+# Global regions to expose (order)
 GLOBAL_REGIONS_CANON = ["North America", "Europe", "FSU", "Middle East", "Asia Pacific", "China"]
-# Accept these aliases in the sheet and normalize to the canonical names above
 GLOBAL_REGION_ALIASES = {
     "North America": "North America",
     "Europe": "Europe",
@@ -34,14 +33,13 @@ GLOBAL_REGION_ALIASES = {
 # Read only columns A:Q
 USECOLS = "A:Q"
 
-# Custom colors by year
+# Year colors
 YEAR_COLORS = {2026: "blue", 2025: "black", 2024: "red", 2023: "green"}
 
 # ----------------------------------------------------------------------
 _qpat = re.compile(r"^Q([1-4])\s*'?(\d{2})$", re.I)
 
 def _resolve_xlsx(APP_DIR: Path) -> Path | None:
-    """Locate the Excel file (fallbacks similar to tab_hdd)."""
     candidates = [
         APP_DIR / DEFAULT_BAL_XLSX,
         APP_DIR / BAL_FILE_CANDIDATE,
@@ -64,7 +62,6 @@ def _is_quarter_label(x) -> bool:
     return bool(_qpat.match(str(x).strip()))
 
 def _parse_quarter_label(x):
-    """'Q1 23' or "Q1'23" -> (year=2023, quarter=1)"""
     m = _qpat.match(str(x).strip())
     if not m:
         return None
@@ -74,12 +71,6 @@ def _parse_quarter_label(x):
     return (year, q)
 
 def _to_number(x):
-    """
-    Converts Excel-style number formats:
-      - (169) → -169
-      - dashes or blanks → NaN
-      - removes thousand separators
-    """
     if pd.isna(x):
         return pd.NA
     s = str(x).strip()
@@ -98,29 +89,21 @@ def _to_number(x):
 def _load_blocked_sheet(xlsx_path: Path, sheet_name: str):
     return pd.read_excel(xlsx_path, sheet_name=sheet_name, header=None, usecols=USECOLS, engine="openpyxl")
 
-def _tidy_from_structured_df(df: pd.DataFrame, region_list: list[str], *,
-                             canonicalize=None, product_label: str | None = None):
-    """
-    Parse a balances sheet arranged by blocks:
-      A: Region header row, then a header row with quarter labels (B:Q),
-         then product line (or a single 'global' line), then Demand, Supply.
-    Returns columns: [Region, Product, Metric, QuarterLabel, Year, Quarter, Value]
-    """
-    def _cell_a(i):
-        v = df.iat[i, 0]
-        return str(v).strip() if not pd.isna(v) else ""
+def _cell_a(df: pd.DataFrame, i: int) -> str:
+    v = df.iat[i, 0]
+    return str(v).strip() if not pd.isna(v) else ""
 
-    region_rows = [i for i in range(len(df)) if _cell_a(i) in region_list]
-
+# ---------- US by PADD (product breakdown; header usually below region) ----------
+def _tidy_padd_df(df: pd.DataFrame):
+    region_rows = [i for i in range(len(df)) if _cell_a(df, i) in PADD_REGIONS]
     tidy = []
     for rstart in region_rows:
-        region_raw = _cell_a(rstart)
-        region = canonicalize(region_raw) if canonicalize else region_raw
+        region = _cell_a(df, rstart)
 
-        # detect the header row (quarter labels) near region header
+        # find quarter header AFTER the region row
         header_row = None
         for j in range(rstart, min(rstart + 6, len(df))):
-            row = df.iloc[j, 1:]  # B:Q
+            row = df.iloc[j, 1:]
             n_q = sum(_is_quarter_label(x) for x in row)
             if n_q >= max(6, int(0.5 * len(row))):
                 header_row = j
@@ -128,62 +111,85 @@ def _tidy_from_structured_df(df: pd.DataFrame, region_list: list[str], *,
         if header_row is None:
             continue
 
-        quarters = df.iloc[header_row, 1:].tolist()  # B..Q
+        quarters = df.iloc[header_row, 1:].tolist()
         qcols = [c for c, q in enumerate(quarters, start=1) if _is_quarter_label(q)]
         qlabels = [df.iat[header_row, c] for c in qcols]
         qmeta = [_parse_quarter_label(x) for x in qlabels]
 
         i = header_row + 1
         while i < len(df):
-            a = _cell_a(i)
-
-            # stop if we hit the next region header
-            if a in region_list and i != rstart:
+            a = _cell_a(df, i)
+            if a in PADD_REGIONS and i != rstart:
                 break
-            if a and a.strip().lower().startswith("total"):
+            if a and a.lower().startswith("total"):
                 break
 
-            # If a product label is provided (global sheet), we ignore the text in col A
-            # and treat this line as the 'Balance' row if it isn't Demand/Supply/blank.
-            if product_label is not None:
-                if a not in ("", "Demand", "Supply"):
-                    # Global balance line
-                    row_bal = [_to_number(df.iat[i, c]) for c in qcols]
-                    for (year, q), lbl, val in zip(qmeta, qlabels, row_bal):
-                        tidy.append([region, product_label, "Balance", str(lbl), year, q, val])
+            if a not in ("", "Demand", "Supply"):
+                product = a
+                row_bal = [_to_number(df.iat[i, c]) for c in qcols]
+                for (year, q), lbl, val in zip(qmeta, qlabels, row_bal):
+                    tidy.append([region, product, "Balance", str(lbl), year, q, val])
 
-                    if i + 1 < len(df) and _cell_a(i + 1).lower() == "demand":
-                        row_dem = [_to_number(df.iat[i + 1, c]) for c in qcols]
-                        for (year, q), lbl, val in zip(qmeta, qlabels, row_dem):
-                            tidy.append([region, product_label, "Demand", str(lbl), year, q, val])
-                        i += 1
+                if i + 1 < len(df) and _cell_a(df, i + 1).lower() == "demand":
+                    row_dem = [_to_number(df.iat[i + 1, c]) for c in qcols]
+                    for (year, q), lbl, val in zip(qmeta, qlabels, row_dem):
+                        tidy.append([region, product, "Demand", str(lbl), year, q, val])
+                    i += 1
 
-                    if i + 1 < len(df) and _cell_a(i + 1).lower() == "supply":
-                        row_sup = [_to_number(df.iat[i + 1, c]) for c in qcols]
-                        for (year, q), lbl, val in zip(qmeta, qlabels, row_sup):
-                            tidy.append([region, product_label, "Supply", str(lbl), year, q, val])
-                        i += 1
-            else:
-                # PADD sheet parsing with product names
-                if a not in ("", "Demand", "Supply"):
-                    product = a
-                    row_bal = [_to_number(df.iat[i, c]) for c in qcols]
-                    for (year, q), lbl, val in zip(qmeta, qlabels, row_bal):
-                        tidy.append([region, product, "Balance", str(lbl), year, q, val])
-
-                    if i + 1 < len(df) and _cell_a(i + 1).lower() == "demand":
-                        row_dem = [_to_number(df.iat[i + 1, c]) for c in qcols]
-                        for (year, q), lbl, val in zip(qmeta, qlabels, row_dem):
-                            tidy.append([region, product, "Demand", str(lbl), year, q, val])
-                        i += 1
-
-                    if i + 1 < len(df) and _cell_a(i + 1).lower() == "supply":
-                        row_sup = [_to_number(df.iat[i + 1, c]) for c in qcols]
-                        for (year, q), lbl, val in zip(qmeta, qlabels, row_sup):
-                            tidy.append([region, product, "Supply", str(lbl), year, q, val])
-                        i += 1
-
+                if i + 1 < len(df) and _cell_a(df, i + 1).lower() == "supply":
+                    row_sup = [_to_number(df.iat[i + 1, c]) for c in qcols]
+                    for (year, q), lbl, val in zip(qmeta, qlabels, row_sup):
+                        tidy.append([region, product, "Supply", str(lbl), year, q, val])
+                    i += 1
             i += 1
+
+    tidy_df = pd.DataFrame(tidy, columns=["Region", "Product", "Metric", "QuarterLabel", "Year", "Quarter", "Value"])
+    tidy_df["Value"] = pd.to_numeric(tidy_df["Value"], errors="coerce")
+    tidy_df = tidy_df.dropna(subset=["Value"]).reset_index(drop=True)
+    tidy_df["SortKey"] = tidy_df["Year"] * 10 + tidy_df["Quarter"]
+    tidy_df = tidy_df.sort_values(["Region", "Product", "Metric", "SortKey"]).reset_index(drop=True)
+    return tidy_df
+
+# ---------- Global LPG balances (no product breakdown; header ABOVE regions) ----------
+def _tidy_global_df(df: pd.DataFrame):
+    # 1) Find the single header row anywhere in the sheet
+    header_row = None
+    for j in range(len(df)):
+        row = df.iloc[j, 1:]
+        n_q = sum(_is_quarter_label(x) for x in row)
+        if n_q >= max(6, int(0.5 * len(row))):
+            header_row = j
+            break
+    if header_row is None:
+        return pd.DataFrame(columns=["Region","Product","Metric","QuarterLabel","Year","Quarter","Value"])
+
+    quarters = df.iloc[header_row, 1:].tolist()
+    qcols = [c for c, q in enumerate(quarters, start=1) if _is_quarter_label(q)]
+    qlabels = [df.iat[header_row, c] for c in qcols]
+    qmeta = [_parse_quarter_label(x) for x in qlabels]
+
+    # 2) Region rows anywhere below/above the header
+    alias_keys = list(GLOBAL_REGION_ALIASES.keys())
+    region_rows = [i for i in range(len(df)) if _cell_a(df, i) in alias_keys]
+
+    tidy = []
+    for rstart in region_rows:
+        region_name = GLOBAL_REGION_ALIASES[_cell_a(df, rstart)]
+
+        # Balance = values on the same row as the region
+        row_bal = [_to_number(df.iat[rstart, c]) for c in qcols]
+        for (year, q), lbl, val in zip(qmeta, qlabels, row_bal):
+            tidy.append([region_name, "Global LPG", "Balance", str(lbl), year, q, val])
+
+        # Demand/Supply if present on next lines
+        if rstart + 1 < len(df) and _cell_a(df, rstart + 1).lower() == "demand":
+            row_dem = [_to_number(df.iat[rstart + 1, c]) for c in qcols]
+            for (year, q), lbl, val in zip(qmeta, qlabels, row_dem):
+                tidy.append([region_name, "Global LPG", "Demand", str(lbl), year, q, val])
+        if rstart + 2 < len(df) and _cell_a(df, rstart + 2).lower() == "supply":
+            row_sup = [_to_number(df.iat[rstart + 2, c]) for c in qcols]
+            for (year, q), lbl, val in zip(qmeta, qlabels, row_sup):
+                tidy.append([region_name, "Global LPG", "Supply", str(lbl), year, q, val])
 
     tidy_df = pd.DataFrame(tidy, columns=["Region", "Product", "Metric", "QuarterLabel", "Year", "Quarter", "Value"])
     tidy_df["Value"] = pd.to_numeric(tidy_df["Value"], errors="coerce")
@@ -195,22 +201,14 @@ def _tidy_from_structured_df(df: pd.DataFrame, region_list: list[str], *,
 # Cached loaders
 @st.cache_data(show_spinner=False)
 def _load_us_by_padd(xlsx_path: Path):
-    df_raw = _load_blocked_sheet(xlsx_path, SHEET_US_PADD)
-    return _tidy_from_structured_df(df_raw, region_list=PADD_REGIONS, product_label=None)
+    return _tidy_padd_df(_load_blocked_sheet(xlsx_path, SHEET_US_PADD))
 
 @st.cache_data(show_spinner=False)
 def _load_global_balances(xlsx_path: Path):
-    df_raw = _load_blocked_sheet(xlsx_path, SHEET_GLOBAL)
-    # Accept both "Asia Pacific" and "Asia-Pacific" and normalize to "Asia Pacific"
-    region_list = list(GLOBAL_REGION_ALIASES.keys())
-    def _canon(name: str) -> str:
-        return GLOBAL_REGION_ALIASES.get(name, name)
-    # There is no product breakdown in this sheet -> single product label
-    return _tidy_from_structured_df(df_raw, region_list=region_list, canonicalize=_canon, product_label="Global LPG")
+    return _tidy_global_df(_load_blocked_sheet(xlsx_path, SHEET_GLOBAL))
 
 # ----------------------------------------------------------------------
 def _plot_seasonal_quarter(df_one_series: pd.DataFrame, title: str):
-    """Seasonal plot: X = Q1..Q4, one line per year, with custom colors for 2026/25/24/23."""
     quarter_labels = ["Q1", "Q2", "Q3", "Q4"]
     pivot = df_one_series.pivot_table(index="Year", columns="Quarter", values="Value", aggfunc="first").sort_index()
 
@@ -243,13 +241,13 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
             st.error(f"Error reading Excel: {e}")
             st.stop()
 
-        # UI — region scope
+        # Top-level regions (US + six globals)
         top_regions = ["US"] + GLOBAL_REGIONS_CANON
+
         c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.0, 1.2])
         with c1:
             scope_region = st.selectbox("Region (Global balances + US)", top_regions, index=0)
 
-        # Drilldown for US (PADD)
         use_padd = False
         with c2:
             if scope_region == "US":
@@ -257,11 +255,9 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
             else:
                 st.write("")
 
-        # Series selector
         with c4:
             metric = st.radio("Series", ["Balance", "Demand", "Supply"], index=0, horizontal=False)
 
-        # Product selector logic:
         if scope_region == "US" and use_padd:
             with c3:
                 sub_region = st.selectbox("PADD region", PADD_REGIONS, index=PADD_REGIONS.index("Total US"))
@@ -269,8 +265,8 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
             product = st.selectbox("Product", products_in_region, index=0, key="prod_us_padd")
             dd = df_us[(df_us["Region"] == sub_region) & (df_us["Product"] == product) & (df_us["Metric"] == metric)].copy()
             title = f"{sub_region} — {product} — {metric} (kb/d) • Seasonal by Quarter"
+
         elif scope_region == "US" and not use_padd:
-            # Try global 'US' first (if ever present). If not, sum PADDs to Total US.
             dd = df_glob[(df_glob["Region"] == "US") & (df_glob["Product"] == "Global LPG") & (df_glob["Metric"] == metric)].copy()
             if dd.empty:
                 total_us = (
@@ -278,15 +274,15 @@ def render_balances_tab(tabs, APP_DIR: Path, tab_index: int) -> None:
                     .groupby(["Year", "Quarter"], as_index=False)["Value"].sum()
                     .assign(Region="Total US", Product="Global LPG")
                 )
-                # add labels needed by plot
                 total_us["QuarterLabel"] = total_us["Quarter"].map({1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"})
                 dd = total_us
                 title = f"Total US (from PADDs) — {metric} (kb/d) • Seasonal by Quarter"
             else:
                 title = f"US — Global LPG — {metric} (kb/d) • Seasonal by Quarter"
             st.selectbox("Product", ["Global LPG"], index=0, disabled=True, key="prod_us_total")
+
         else:
-            # Global region (no product breakdown) → fixed 'Global LPG'
+            # Global region (fixed product)
             st.selectbox("Product", ["Global LPG"], index=0, disabled=True, key="prod_global")
             dd = df_glob[(df_glob["Region"] == scope_region) & (df_glob["Product"] == "Global LPG") & (df_glob["Metric"] == metric)].copy()
             title = f"{scope_region} — Global LPG — {metric} (kb/d) • Seasonal by Quarter"
