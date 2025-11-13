@@ -380,15 +380,20 @@ def _compute_spread(df: pd.DataFrame, desc: str, sym_long: str, sym_short: str) 
 # ---------- NEW : utilitaire pour les cracks ----------
 def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, brent_factor: float) -> pd.DataFrame:
     """
-    Calcule un crack = flat_price / (Brent * factor),
-    où Brent est ICLL001 en $/bbl, converti en $/mt via 'brent_factor'.
+    Calcule un crack = flat_price_mt - Brent_mt
+
+    - Brent est ICLL001 (en $/bbl)
+    - On le convertit en $/mt via 'brent_factor' (10.6 pour butane, 12.8 pour propane)
+    - flat_price est la VALUE du symbole sym_flat (déjà en $/mt)
     """
     needed = {"SYMBOL", "ASSESSDATE", "VALUE"}
     if not needed.issubset(df.columns):
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
+    # jambe produit (flat)
     d_flat = df[df["SYMBOL"] == sym_flat].copy()
-    d_brent = df[df["SYMBOL"] == "ICLL001"].copy()  # Brent
+    # Brent
+    d_brent = df[df["SYMBOL"] == "ICLL001"].copy()
 
     if d_flat.empty or d_brent.empty:
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
@@ -412,26 +417,22 @@ def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, brent_factor: flo
     if m.empty:
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    # Brent en $/mt
+    # Brent converti en $/mt
     m["BRENT_MT"] = m["VALUE_BRENT"] * brent_factor
 
-    # éviter division par zéro
-    m = m[m["BRENT_MT"] != 0]
-    if m.empty:
-        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
-
-    m["VALUE"] = m["VALUE_FLAT"] / m["BRENT_MT"]
+    # crack = flat_price_mt - brent_mt
+    m["VALUE"] = m["VALUE_FLAT"] - m["BRENT_MT"]
     m["DESCRIPTION"] = desc
 
     cols_out = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
-    # on garde MOM / CURRENCY du flat leg
+    # On garde MOM / CURRENCY de la jambe flat (si dispo)
     if "MOM" in m.columns:
         cols_out.append("MOM")
     if "CURRENCY" in m.columns:
         cols_out.append("CURRENCY")
 
-    out = m[cols_out].copy()
-    return out
+    return m[cols_out].copy()
+
 
 
 def _section(df: pd.DataFrame, title: str, priority_desc=None):
