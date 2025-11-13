@@ -389,10 +389,12 @@ def _section(df: pd.DataFrame, title: str):
 
     all_desc = [str(x) for x in sorted(df["DESCRIPTION"].dropna().unique())]
 
-    # 3 graphes par ligne
+    # 3 graphes par ligne, mais on garde toujours 3 colonnes
     for row_desc in _chunk(all_desc, 3):
-        cols = st.columns(len(row_desc))
-        for col, desc in zip(cols, row_desc):
+        # Toujours 3 colonnes pour garder la même largeur de graph
+        cols = st.columns(3)
+        for i, desc in enumerate(row_desc):
+            col = cols[i]  # on n'utilise que les premières colonnes nécessaires
             with col:
                 sub = df[df["DESCRIPTION"].astype(str) == desc]
 
@@ -404,6 +406,9 @@ def _section(df: pd.DataFrame, title: str):
                 html = _metrics_table_html(sub)
                 if html:
                     st.markdown(html, unsafe_allow_html=True)
+        # Les colonnes restantes (si 1 ou 2 graphes seulement) restent vides,
+        # ce qui garde la même largeur pour les graphes affichés.
+
 
 
 
@@ -475,10 +480,6 @@ def render():
 
     # ---------- NEW : sous-partie "Diffs" ----------
     diff_specs = [
-        # Butane NWE Large Cargo NWE vs MED : PMAAK00 - APRPF00
-        ("Butane NWE Large Cargo NWE vs MED", "PMAAK00", "APRPF00"),
-        # Butane NWE Large Cargo CIF vs FOB : PMAAK00 - APRPB00
-        ("Butane NWE Large Cargo CIF vs FOB", "PMAAK00", "APRPB00"),
         # Butane FOB ARA - Butane FOB NWE Large Cargo : PMAAC00 - APRPF00
         ("Butane FOB ARA - Butane FOB NWE Large Cargo", "PMAAC00", "APRPF00"),
     ]
