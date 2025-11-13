@@ -17,6 +17,7 @@ BUTANE_SYMBOLS = [
     'ABTNB00','APRPF00','PMAAI00','AAWUF00','PTAAF10','PMAAF00','PMAAB00','PHAKG00',
     'AAWWM00','AAWWL00','FOCBA00','PHALA00','PHALF11','MTBEA00'
 ]
+
 PROPANE_SYMBOLS = [
     'PMAAY00','AAWUD00','PMAAS00','APRPE00','PTAAM10','AAXIM00','PCMDM00','HPAJP00',
     'AAUXJ00','AAWWK00','PHAJD00','AEFOB00','AAOTM00','AAOTN00','PHAJC00'
@@ -330,6 +331,51 @@ def _metrics_table_html(sub: pd.DataFrame) -> str:
     return "\n".join(html)
 
 
+# ---------- NEW : fonction utilitaire pour calculer un spread sym1 - sym2 ----------
+def _compute_spread(df: pd.DataFrame, desc: str, sym_long: str, sym_short: str) -> pd.DataFrame:
+    """
+    Calcule un spread (sym_long - sym_short) sur la base de la colonne SYMBOL.
+    Retourne un DataFrame avec DESCRIPTION / ASSESSDATE / VALUE (+ MOM/CURRENCY si dispo).
+    """
+    needed = {"SYMBOL", "ASSESSDATE", "VALUE"}
+    if not needed.issubset(df.columns):
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    d1 = df[df["SYMBOL"] == sym_long].copy()
+    d2 = df[df["SYMBOL"] == sym_short].copy()
+    if d1.empty or d2.empty:
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    d1["ASSESSDATE"] = pd.to_datetime(d1["ASSESSDATE"], errors="coerce")
+    d2["ASSESSDATE"] = pd.to_datetime(d2["ASSESSDATE"], errors="coerce")
+
+    cols1 = ["ASSESSDATE", "VALUE"]
+    for c in ("MOM", "CURRENCY"):
+        if c in d1.columns:
+            cols1.append(c)
+
+    m = pd.merge(
+        d1[cols1],
+        d2[["ASSESSDATE", "VALUE"]],
+        on="ASSESSDATE",
+        how="inner",
+        suffixes=("1", "2")
+    ).dropna(subset=["VALUE1", "VALUE2"])
+
+    if m.empty:
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    m["VALUE"] = m["VALUE1"] - m["VALUE2"]
+    m["DESCRIPTION"] = desc
+
+    cols_out = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
+    for c in ("MOM", "CURRENCY"):
+        if c in m.columns:
+            cols_out.append(c)
+
+    out = m[cols_out].copy()
+    return out
+
 
 def _section(df: pd.DataFrame, title: str):
     # Titre stylisé plus grand
@@ -395,6 +441,54 @@ def render():
     df_but = _filter_category(df, "Butane")
     df_pro = _filter_category(df, "Propane")
 
+    # ---------- NEW : spreads M1/M2 dans la section Butane ----------
+    but_spreads = [
+        # Butane Entreprise Mt Belvieu M1/M2 : PMAAI00 - AAWUF00
+        ("Butane Entreprise Mt Belvieu M1/M2", "PMAAI00", "AAWUF00"),
+    ]
+    for desc, s1, s2 in but_spreads:
+        sp = _compute_spread(df, desc, s1, s2)
+        if not sp.empty:
+            df_but = pd.concat([df_but, sp], ignore_index=True)
+
+    # ---------- NEW : spreads M1/M2 dans la section Propane ----------
+    pro_spreads = [
+        # Propane CIF NWE Large Cargo M1/M2
+        ("Propane CIF NWE Large Cargo M1/M2", "AAHIK00", "AAHIM00"),
+        # Propane FOB Saudi Arabia CP M1/M2
+        ("Propane FOB Saudi Arabia CP M1/M2", "AAHHG00", "AAHHH00"),
+        # Propane Mt Belvieu M1/M2
+        ("Propane Mt Belvieu M1/M2", "PMAAY00", "AAWUD00"),
+        # Propane CFR North Asia M1/M2
+        ("Propane CFR North Asia M1/M2", "AZWUA01", "AZWUA02"),
+        # Propane USGC M1/M2
+        ("Propane USGC M1/M2", "AAHYX00", "AAHYY00"),
+    ]
+    for desc, s1, s2 in pro_spreads:
+        sp = _compute_spread(df, desc, s1, s2)
+        if not sp.empty:
+            df_pro = pd.concat([df_pro, sp], ignore_index=True)
+
     _section(df_but, "Butane prices")
     st.markdown("---")
     _section(df_pro, "Propane prices")
+
+    # ---------- NEW : sous-partie "Diffs" ----------
+    diff_specs = [
+        # Butane NWE Large Cargo NWE vs MED : PMAAK00 - APRPF00
+        ("Butane NWE Large Cargo NWE vs MED", "PMAAK00", "APRPF00"),
+        # Butane NWE Large Cargo CIF vs FOB : PMAAK00 - APRPB00
+        ("Butane NWE Large Cargo CIF vs FOB", "PMAAK00", "APRPB00"),
+        # Butane FOB ARA - Butane FOB NWE Large Cargo : PMAAC00 - APRPF00
+        ("Butane FOB ARA - Butane FOB NWE Large Cargo", "PMAAC00", "APRPF00"),
+    ]
+    diff_dfs = []
+    for desc, s1, s2 in diff_specs:
+        sp = _compute_spread(df, desc, s1, s2)
+        if not sp.empty:
+            diff_dfs.append(sp)
+
+    if diff_dfs:
+        df_diffs = pd.concat(diff_dfs, ignore_index=True)
+        st.markdown("---")
+        _section(df_diffs, "Diffs")
