@@ -10,15 +10,29 @@ import prices                     # existing module
 import tab_hdd                    # HDD tab
 import tab_balances               # Balances tab
 import tab_imports_exports_stocks # Imports-Exports-Stocks tab
-import tab_technicals             # NEW Technicals tab
+import tab_technicals             # Technicals tab
+import tab_data_providers_reports # 👈 NEW : Latest reports tab
 
 st.set_page_config(page_title="LPG Market Dashboard", layout="wide")
 st.title("LPG Market Dashboard")
 
 APP_DIR = Path(__file__).parent
 
-# 5 tabs: Prices (0) / Temp & HDD (1) / Balances (2) / Imports-Exports-Stocks (3) / Technicals (4)
-tabs = st.tabs(["Prices", "Temp & HDD", "Balances", "Imports-Exports-Stocks", "Technicals"])
+# 6 tabs total:
+# 0 Prices
+# 1 Temp & HDD
+# 2 Balances
+# 3 Imports-Exports-Stocks
+# 4 Technicals
+# 5 Latest reports   👈 moved last
+tabs = st.tabs([
+    "Prices",
+    "Temp & HDD",
+    "Balances",
+    "Imports-Exports-Stocks",
+    "Technicals",
+    "Latest reports",   # 👈 now last tab
+])
 
 # Prices (index 0)
 with tabs[0]:
@@ -35,3 +49,7 @@ tab_imports_exports_stocks.render_trade_tab(tabs, APP_DIR, tab_index=3)
 
 # Technicals (index 4)
 tab_technicals.render_technicals_tab(tabs, APP_DIR, tab_index=4)
+
+# Latest reports (index 5)
+with tabs[5]:
+    tab_data_providers_reports.render()  # 👈 now the last tab
