@@ -415,10 +415,6 @@ def _section(df: pd.DataFrame, title: str, priority_desc=None):
                     st.markdown(html, unsafe_allow_html=True)
         # colonnes restantes (si 1 ou 2 graphes) => vides, donc même largeur
 
-
-
-
-
 def render():
     st.header("Prices – Seasonal Charts")
 
@@ -449,7 +445,7 @@ def render():
         st.error(f"Colonnes manquantes : {', '.join(missing)}. Colonnes trouvées : {', '.join(df.columns)}")
         return
 
-    # Sections : Butane puis Propane
+    # Sections : Propane puis Butane
     df_but = _filter_category(df, "Butane")
     df_pro = _filter_category(df, "Propane")
 
@@ -475,13 +471,14 @@ def render():
         if not sp.empty:
             df_pro = pd.concat([df_pro, sp], ignore_index=True)
 
-    # 👉 ici on PASSE les spreads en priorité pour l'affichage
+    # 👉 spreads en priorité dans l'affichage
     priority_but = [d for d, _, _ in but_spreads]
     priority_pro = [d for d, _, _ in pro_spreads]
 
-    _section(df_but, "Butane prices", priority_desc=priority_but)
-    st.markdown("---")
+    # 👉 PROPANE EN PREMIER
     _section(df_pro, "Propane prices", priority_desc=priority_pro)
+    st.markdown("---")
+    _section(df_but, "Butane prices", priority_desc=priority_but)
 
     # ---------- sous-partie "Diffs" ----------
     diff_specs = [
