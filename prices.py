@@ -380,40 +380,56 @@ def _compute_spread(df: pd.DataFrame, desc: str, sym_long: str, sym_short: str) 
 # ---------- NEW : utilitaire pour les cracks ----------
 def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, factor: float) -> pd.DataFrame:
     """
-    Nouveau calcul :
-    crack = (flat_price_mt / factor) - flat_price_mt
-    => conversion mt → bbl (division)
+    Calcule un crack en $/bbl :
+
+        crack = (flat_mt / factor) - brent_bbl
+
+    - flat_mt   : prix du produit (sym_flat) en $/mt
+    - factor    : 10.6 (butane) ou 12.8 (propane)
+    - brent_bbl : ICLL001 en $/bbl
     """
 
     needed = {"SYMBOL", "ASSESSDATE", "VALUE"}
     if not needed.issubset(df.columns):
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    # extraire le flat
-    d = df[df["SYMBOL"] == sym_flat].copy()
-    if d.empty:
+    # --- jambe produit (flat en $/mt) ---
+    d_flat = df[df["SYMBOL"] == sym_flat].copy()
+
+    # --- Brent (ICLL001, $/bbl) ---
+    d_brent = df[df["SYMBOL"] == "ICLL001"].copy()
+
+    if d_flat.empty or d_brent.empty:
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    d["ASSESSDATE"] = pd.to_datetime(d["ASSESSDATE"], errors="coerce")
-    d = d.dropna(subset=["ASSESSDATE", "VALUE"])
+    # Nettoyage des dates
+    d_flat["ASSESSDATE"] = pd.to_datetime(d_flat["ASSESSDATE"], errors="coerce")
+    d_brent["ASSESSDATE"] = pd.to_datetime(d_brent["ASSESSDATE"], errors="coerce")
 
-    # flat mt
-    d["FLAT_MT"] = d["VALUE"].astype(float)
+    d_flat = d_flat.dropna(subset=["ASSESSDATE", "VALUE"])
+    d_brent = d_brent.dropna(subset=["ASSESSDATE", "VALUE"])
 
-    # flat converti en $/bbl  (division)
-    d["FLAT_BBL"] = d["FLAT_MT"] / factor
+    # On garde juste ce qu'il faut et on renomme clairement
+    d_flat = d_flat[["ASSESSDATE", "VALUE"]].rename(columns={"VALUE": "FLAT_MT"})
+    d_brent = d_brent[["ASSESSDATE", "VALUE"]].rename(columns={"VALUE": "BRENT_BBL"})
 
-    # ton crack : conversion – flat
-    d["VALUE"] = d["FLAT_BBL"] - d["FLAT_MT"]
+    # Merge sur la date
+    m = pd.merge(d_flat, d_brent, on="ASSESSDATE", how="inner").dropna()
+    if m.empty:
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    d["DESCRIPTION"] = desc
+    # Conversion du flat en $/bbl
+    m["FLAT_BBL"] = m["FLAT_MT"] / factor
 
-    cols_out = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
-    for c in ("MOM", "CURRENCY"):
-        if c in d.columns:
-            cols_out.append(c)
+    # Crack en $/bbl
+    m["VALUE"] = m["FLAT_BBL"] - m["BRENT_BBL"]
+    m["DESCRIPTION"] = desc
 
-    return d[cols_out].copy()
+    # On fixe explicitement l'unité en $/bbl pour les cracks
+    m["MOM"] = "USD/bbl"
+    m["CURRENCY"] = "USD"
+
+    return m[["DESCRIPTION", "ASSESSDATE", "VALUE", "MOM", "CURRENCY"]].copy()
 
 
 
