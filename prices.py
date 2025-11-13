@@ -378,68 +378,42 @@ def _compute_spread(df: pd.DataFrame, desc: str, sym_long: str, sym_short: str) 
 
 
 # ---------- NEW : utilitaire pour les cracks ----------
-def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, brent_factor: float) -> pd.DataFrame:
+def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, factor: float) -> pd.DataFrame:
     """
-    Calcule un crack = flat_price_mt - Brent_mt
-
-    - Brent est ICLL001 (en $/bbl)
-    - Conversion $/bbl -> $/mt via 'brent_factor'
-    - flat_price est la VALUE du symbole sym_flat (déjà en $/mt)
+    Nouveau calcul :
+    crack = (flat_price_mt / factor) - flat_price_mt
+    => conversion mt → bbl (division)
     """
 
     needed = {"SYMBOL", "ASSESSDATE", "VALUE"}
     if not needed.issubset(df.columns):
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    # --- Jambe produit (flat) ---
-    d_flat = df[df["SYMBOL"] == sym_flat].copy()
-    # --- Brent ---
-    d_brent = df[df["SYMBOL"] == "ICLL001"].copy()
-
-    if d_flat.empty or d_brent.empty:
+    # extraire le flat
+    d = df[df["SYMBOL"] == sym_flat].copy()
+    if d.empty:
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    # Nettoyage dates
-    d_flat["ASSESSDATE"] = pd.to_datetime(d_flat["ASSESSDATE"], errors="coerce")
-    d_brent["ASSESSDATE"] = pd.to_datetime(d_brent["ASSESSDATE"], errors="coerce")
+    d["ASSESSDATE"] = pd.to_datetime(d["ASSESSDATE"], errors="coerce")
+    d = d.dropna(subset=["ASSESSDATE", "VALUE"])
 
-    # On garde le minimum nécessaire et on RENOMME AVANT le merge
-    flat_cols = ["ASSESSDATE", "VALUE"]
-    if "MOM" in d_flat.columns:
-        flat_cols.append("MOM")
-    if "CURRENCY" in d_flat.columns:
-        flat_cols.append("CURRENCY")
+    # flat mt
+    d["FLAT_MT"] = d["VALUE"].astype(float)
 
-    d_flat = d_flat[flat_cols].rename(columns={"VALUE": "FLAT_VALUE"})
+    # flat converti en $/bbl  (division)
+    d["FLAT_BBL"] = d["FLAT_MT"] / factor
 
-    d_brent = d_brent[["ASSESSDATE", "VALUE"]].rename(columns={"VALUE": "BRENT_BBL"})
+    # ton crack : conversion – flat
+    d["VALUE"] = d["FLAT_BBL"] - d["FLAT_MT"]
 
-    # Merge sur la date
-    m = pd.merge(
-        d_flat,
-        d_brent,
-        on="ASSESSDATE",
-        how="inner"
-    ).dropna(subset=["FLAT_VALUE", "BRENT_BBL"])
+    d["DESCRIPTION"] = desc
 
-    if m.empty:
-        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
-
-    # Brent converti en $/mt
-    m["BRENT_MT"] = m["BRENT_BBL"] * brent_factor
-
-    # crack = flat_price_mt - brent_mt
-    m["VALUE"] = m["FLAT_VALUE"] - m["BRENT_MT"]
-    m["DESCRIPTION"] = desc
-
-    # On renvoie DESCRIPTION / ASSESSDATE / VALUE (+ MOM / CURRENCY du flat si dispo)
     cols_out = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
-    if "MOM" in m.columns:
-        cols_out.append("MOM")
-    if "CURRENCY" in m.columns:
-        cols_out.append("CURRENCY")
+    for c in ("MOM", "CURRENCY"):
+        if c in d.columns:
+            cols_out.append(c)
 
-    return m[cols_out].copy()
+    return d[cols_out].copy()
 
 
 
@@ -485,7 +459,7 @@ def _section(df: pd.DataFrame, title: str, priority_desc=None):
 def render():
     st.header("Prices – Seasonal Charts")
 
-    # Chargement auto
+    # --- Chargement auto du fichier Excel ---
     df = None
     if DEFAULT_XLSX.exists():
         try:
@@ -502,21 +476,28 @@ def render():
         df = load_excel(uploaded)
         st.caption("Loaded uploaded file.")
 
-    # Nettoyage : spike Propane Cracker Margin (PCMDM00 > 2000)
+    # --- Nettoyage : spike Propane Cracker Margin (PCMDM00 > 2000) ---
     if "SYMBOL" in df.columns and "VALUE" in df.columns:
         df = df[~((df["SYMBOL"] == "PCMDM00") & (df["VALUE"] > 2000))]
 
-    required = ["DESCRIPTION","ASSESSDATE","VALUE"]
+    # --- Vérification colonnes minimales ---
+    required = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
     missing = [c for c in required if c not in df.columns]
     if missing:
-        st.error(f"Colonnes manquantes : {', '.join(missing)}. Colonnes trouvées : {', '.join(df.columns)}")
+        st.error(
+            f"Colonnes manquantes : {', '.join(missing)}. "
+            f"Colonnes trouvées : {', '.join(df.columns)}"
+        )
         return
 
-    # Sections : Propane puis Butane
+    # --- Séparation Propane / Butane (sections de base) ---
     df_but = _filter_category(df, "Butane")
     df_pro = _filter_category(df, "Propane")
 
-    # ---------- spreads M1/M2 dans la section Butane ----------
+    # ---------------------------------------------------------
+    # Spreads M1/M2
+    # ---------------------------------------------------------
+    # Butane spreads
     but_spreads = [
         ("Butane Entreprise Mt Belvieu M1/M2", "PMAAI00", "AAWUF00"),
     ]
@@ -525,7 +506,7 @@ def render():
         if not sp.empty:
             df_but = pd.concat([df_but, sp], ignore_index=True)
 
-    # ---------- spreads M1/M2 dans la section Propane ----------
+    # Propane spreads
     pro_spreads = [
         ("Propane CIF NWE Large Cargo M1/M2", "AAHIK00", "AAHIM00"),
         ("Propane FOB Saudi Arabia CP M1/M2", "AAHHG00", "AAHHH00"),
@@ -538,8 +519,11 @@ def render():
         if not sp.empty:
             df_pro = pd.concat([df_pro, sp], ignore_index=True)
 
-    # ---------- NEW : cracks Butane & Propane ----------
-    # Butane NWE cracks : PMAAK00 vs Brent (ICLL001) avec *10.6
+    # ---------------------------------------------------------
+    # Cracks (nouvelle définition)
+    # crack = (flat / factor) - flat
+    # Butane factor = 10.6 ; Propane factor = 12.8
+    # ---------------------------------------------------------
     but_cracks = [
         ("Butane NWE cracks", "PMAAK00", 10.6),
     ]
@@ -548,7 +532,6 @@ def render():
         if not cr.empty:
             df_but = pd.concat([df_but, cr], ignore_index=True)
 
-    # Propane NWE cracks : PMABA00 vs Brent (ICLL001) avec *12.8
     pro_cracks = [
         ("Propane NWE cracks", "PMABA00", 12.8),
     ]
@@ -557,16 +540,20 @@ def render():
         if not cr.empty:
             df_pro = pd.concat([df_pro, cr], ignore_index=True)
 
-    # 👉 spreads puis cracks en priorité dans l'affichage
+    # ---------------------------------------------------------
+    # Priorité d’affichage : spreads puis cracks en haut
+    # ---------------------------------------------------------
     priority_but = [d for d, _, _ in but_spreads] + [d for d, _, _ in but_cracks]
     priority_pro = [d for d, _, _ in pro_spreads] + [d for d, _, _ in pro_cracks]
 
-    # 👉 PROPANE EN PREMIER
+    # Propane en premier, puis Butane
     _section(df_pro, "Propane prices", priority_desc=priority_pro)
     st.markdown("---")
     _section(df_but, "Butane prices", priority_desc=priority_but)
 
-    # ---------- sous-partie "Diffs" ----------
+    # ---------------------------------------------------------
+    # Sous-partie "Diffs"
+    # ---------------------------------------------------------
     diff_specs = [
         ("Butane FOB ARA - Butane FOB NWE Large Cargo", "PMAAC00", "APRPF00"),
     ]
