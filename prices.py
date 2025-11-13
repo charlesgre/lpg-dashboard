@@ -1,4 +1,3 @@
-# prices.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -20,7 +19,8 @@ BUTANE_SYMBOLS = [
 
 PROPANE_SYMBOLS = [
     'PMAAY00','AAWUD00','PMAAS00','APRPE00','PTAAM10','AAXIM00','PCMDM00','HPAJP00',
-    'AAUXJ00','AAWWK00','PHAJD00','AEFOB00','AAOTM00','AAOTN00','PHAJC00'
+    'AAUXJ00','AAWWK00','PHAJD00','AEFOB00','AAOTM00','AAOTN00','PHAJC00',
+    'PMABA00',  # NEW: Propane NWE flat price
 ]
 
 # --- Styles par année ---
@@ -331,7 +331,7 @@ def _metrics_table_html(sub: pd.DataFrame) -> str:
     return "\n".join(html)
 
 
-# ---------- NEW : fonction utilitaire pour calculer un spread sym1 - sym2 ----------
+# ---------- utilitaire spread sym1 - sym2 ----------
 def _compute_spread(df: pd.DataFrame, desc: str, sym_long: str, sym_short: str) -> pd.DataFrame:
     """
     Calcule un spread (sym_long - sym_short) sur la base de la colonne SYMBOL.
@@ -377,6 +377,63 @@ def _compute_spread(df: pd.DataFrame, desc: str, sym_long: str, sym_short: str) 
     return out
 
 
+# ---------- NEW : utilitaire pour les cracks ----------
+def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, brent_factor: float) -> pd.DataFrame:
+    """
+    Calcule un crack = flat_price / (Brent * factor),
+    où Brent est ICLL001 en $/bbl, converti en $/mt via 'brent_factor'.
+    """
+    needed = {"SYMBOL", "ASSESSDATE", "VALUE"}
+    if not needed.issubset(df.columns):
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    d_flat = df[df["SYMBOL"] == sym_flat].copy()
+    d_brent = df[df["SYMBOL"] == "ICLL001"].copy()  # Brent
+
+    if d_flat.empty or d_brent.empty:
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    d_flat["ASSESSDATE"] = pd.to_datetime(d_flat["ASSESSDATE"], errors="coerce")
+    d_brent["ASSESSDATE"] = pd.to_datetime(d_brent["ASSESSDATE"], errors="coerce")
+
+    cols_flat = ["ASSESSDATE", "VALUE"]
+    for c in ("MOM", "CURRENCY"):
+        if c in d_flat.columns:
+            cols_flat.append(c)
+
+    m = pd.merge(
+        d_flat[cols_flat],
+        d_brent[["ASSESSDATE", "VALUE"]],
+        on="ASSESSDATE",
+        how="inner",
+        suffixes=("_FLAT", "_BRENT")
+    ).dropna(subset=["VALUE_FLAT", "VALUE_BRENT"])
+
+    if m.empty:
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    # Brent en $/mt
+    m["BRENT_MT"] = m["VALUE_BRENT"] * brent_factor
+
+    # éviter division par zéro
+    m = m[m["BRENT_MT"] != 0]
+    if m.empty:
+        return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
+
+    m["VALUE"] = m["VALUE_FLAT"] / m["BRENT_MT"]
+    m["DESCRIPTION"] = desc
+
+    cols_out = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
+    # on garde MOM / CURRENCY du flat leg
+    if "MOM" in m.columns:
+        cols_out.append("MOM")
+    if "CURRENCY" in m.columns:
+        cols_out.append("CURRENCY")
+
+    out = m[cols_out].copy()
+    return out
+
+
 def _section(df: pd.DataFrame, title: str, priority_desc=None):
     # Titre stylisé plus grand
     st.markdown(
@@ -390,9 +447,8 @@ def _section(df: pd.DataFrame, title: str, priority_desc=None):
     # Liste de toutes les descriptions
     all_desc = [str(x) for x in sorted(df["DESCRIPTION"].dropna().unique())]
 
-    # Réordonner pour mettre certaines descriptions en tête (spreads)
+    # Réordonner pour mettre certaines descriptions en tête (spreads, cracks, etc.)
     if priority_desc:
-        # On garde seulement celles qui existent vraiment dans all_desc
         prio = [d for d in priority_desc if d in all_desc]
         rest = [d for d in all_desc if d not in prio]
         all_desc = prio + rest
@@ -414,6 +470,7 @@ def _section(df: pd.DataFrame, title: str, priority_desc=None):
                 if html:
                     st.markdown(html, unsafe_allow_html=True)
         # colonnes restantes (si 1 ou 2 graphes) => vides, donc même largeur
+
 
 def render():
     st.header("Prices – Seasonal Charts")
@@ -471,9 +528,28 @@ def render():
         if not sp.empty:
             df_pro = pd.concat([df_pro, sp], ignore_index=True)
 
-    # 👉 spreads en priorité dans l'affichage
-    priority_but = [d for d, _, _ in but_spreads]
-    priority_pro = [d for d, _, _ in pro_spreads]
+    # ---------- NEW : cracks Butane & Propane ----------
+    # Butane NWE cracks : PMAAK00 vs Brent (ICLL001) avec *10.6
+    but_cracks = [
+        ("Butane NWE cracks", "PMAAK00", 10.6),
+    ]
+    for desc, sym_flat, factor in but_cracks:
+        cr = _compute_crack(df, desc, sym_flat, factor)
+        if not cr.empty:
+            df_but = pd.concat([df_but, cr], ignore_index=True)
+
+    # Propane NWE cracks : PMABA00 vs Brent (ICLL001) avec *12.8
+    pro_cracks = [
+        ("Propane NWE cracks", "PMABA00", 12.8),
+    ]
+    for desc, sym_flat, factor in pro_cracks:
+        cr = _compute_crack(df, desc, sym_flat, factor)
+        if not cr.empty:
+            df_pro = pd.concat([df_pro, cr], ignore_index=True)
+
+    # 👉 spreads puis cracks en priorité dans l'affichage
+    priority_but = [d for d, _, _ in but_spreads] + [d for d, _, _ in but_cracks]
+    priority_pro = [d for d, _, _ in pro_spreads] + [d for d, _, _ in pro_cracks]
 
     # 👉 PROPANE EN PREMIER
     _section(df_pro, "Propane prices", priority_desc=priority_pro)
