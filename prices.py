@@ -383,55 +383,64 @@ def _compute_crack(df: pd.DataFrame, desc: str, sym_flat: str, brent_factor: flo
     Calcule un crack = flat_price_mt - Brent_mt
 
     - Brent est ICLL001 (en $/bbl)
-    - On le convertit en $/mt via 'brent_factor' (10.6 pour butane, 12.8 pour propane)
+    - Conversion $/bbl -> $/mt via 'brent_factor'
     - flat_price est la VALUE du symbole sym_flat (déjà en $/mt)
     """
+
     needed = {"SYMBOL", "ASSESSDATE", "VALUE"}
     if not needed.issubset(df.columns):
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
-    # jambe produit (flat)
+    # --- Jambe produit (flat) ---
     d_flat = df[df["SYMBOL"] == sym_flat].copy()
-    # Brent
+    # --- Brent ---
     d_brent = df[df["SYMBOL"] == "ICLL001"].copy()
 
     if d_flat.empty or d_brent.empty:
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
+    # Nettoyage dates
     d_flat["ASSESSDATE"] = pd.to_datetime(d_flat["ASSESSDATE"], errors="coerce")
     d_brent["ASSESSDATE"] = pd.to_datetime(d_brent["ASSESSDATE"], errors="coerce")
 
-    cols_flat = ["ASSESSDATE", "VALUE"]
-    for c in ("MOM", "CURRENCY"):
-        if c in d_flat.columns:
-            cols_flat.append(c)
+    # On garde le minimum nécessaire et on RENOMME AVANT le merge
+    flat_cols = ["ASSESSDATE", "VALUE"]
+    if "MOM" in d_flat.columns:
+        flat_cols.append("MOM")
+    if "CURRENCY" in d_flat.columns:
+        flat_cols.append("CURRENCY")
 
+    d_flat = d_flat[flat_cols].rename(columns={"VALUE": "FLAT_VALUE"})
+
+    d_brent = d_brent[["ASSESSDATE", "VALUE"]].rename(columns={"VALUE": "BRENT_BBL"})
+
+    # Merge sur la date
     m = pd.merge(
-        d_flat[cols_flat],
-        d_brent[["ASSESSDATE", "VALUE"]],
+        d_flat,
+        d_brent,
         on="ASSESSDATE",
-        how="inner",
-        suffixes=("_FLAT", "_BRENT")
-    ).dropna(subset=["VALUE_FLAT", "VALUE_BRENT"])
+        how="inner"
+    ).dropna(subset=["FLAT_VALUE", "BRENT_BBL"])
 
     if m.empty:
         return pd.DataFrame(columns=["DESCRIPTION", "ASSESSDATE", "VALUE"])
 
     # Brent converti en $/mt
-    m["BRENT_MT"] = m["VALUE_BRENT"] * brent_factor
+    m["BRENT_MT"] = m["BRENT_BBL"] * brent_factor
 
     # crack = flat_price_mt - brent_mt
-    m["VALUE"] = m["VALUE_FLAT"] - m["BRENT_MT"]
+    m["VALUE"] = m["FLAT_VALUE"] - m["BRENT_MT"]
     m["DESCRIPTION"] = desc
 
+    # On renvoie DESCRIPTION / ASSESSDATE / VALUE (+ MOM / CURRENCY du flat si dispo)
     cols_out = ["DESCRIPTION", "ASSESSDATE", "VALUE"]
-    # On garde MOM / CURRENCY de la jambe flat (si dispo)
     if "MOM" in m.columns:
         cols_out.append("MOM")
     if "CURRENCY" in m.columns:
         cols_out.append("CURRENCY")
 
     return m[cols_out].copy()
+
 
 
 
